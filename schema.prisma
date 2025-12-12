@@ -10,6 +10,7 @@ datasource db {
 model User {
   id        String   @id
   bossId    String?
+  isMuted   Boolean  @default(false) // 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   messages  Message[]
@@ -19,7 +20,7 @@ model Message {
   id         Int      @id @default(autoincrement())
   content    String
   isFromUser Boolean
-  type       String   @default("text") // 
+  type       String   @default("text")
   createdAt  DateTime @default(now())
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
