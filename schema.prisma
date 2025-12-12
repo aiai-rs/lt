@@ -23,3 +23,8 @@ model Message {
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
+
+model GlobalConfig {
+  key   String @id
+  value String
+}
