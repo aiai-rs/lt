@@ -7,14 +7,18 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// 客户表
 model User {
   id        String   @id // 客户 ID
   bossId    String?  // 来源
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  
+  // 
   messages  Message[]
 }
 
+// 消息表
 model Message {
   id         Int      @id @default(autoincrement())
   content    String
@@ -22,5 +26,6 @@ model Message {
   createdAt  DateTime @default(now())
   
   userId     String
+  // 
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
