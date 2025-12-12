@@ -3,141 +3,117 @@ const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const { PrismaClient } = require('@prisma/client');
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf'); 
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// 开启大文件支持(图片)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, { 
+    cors: { origin: "*" },
+    maxHttpBufferSize: 1e8 // Socket 100MB 限制
+});
 const prisma = new PrismaClient();
 
 const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
-// 🔴 用于存储待确认的用户ID (清库保护)
-const pendingClear = new Set();
-
 let bot = null;
 
-// ================= Bot 逻辑区域 =================
 if (BOT_TOKEN) {
     bot = new Telegraf(BOT_TOKEN);
-    console.log("🤖 机器人正在启动...");
+    console.log("🤖 机器人启动中...");
 
-    // 1. 欢迎语
-    bot.start((ctx) => {
-        ctx.reply("👋 HY 客服系统已上线。\n\n可用指令：\n/ck - 📊 查看数据状态\n/zc [密码] - 🔐 设置后台密码\n/del [ID] - 🗑️ 删除指定用户\n/sjkqk - 💥 清空所有数据 (慎用)");
+    // 1. 启动 & 绑定通知群组
+    bot.start(async (ctx) => {
+        const chatId = String(ctx.chat.id);
+        try {
+            await prisma.globalConfig.upsert({
+                where: { key: 'admin_tg_id' },
+                update: { value: chatId },
+                create: { key: 'admin_tg_id', value: chatId }
+            });
+            const type = ctx.chat.type === 'private' ? '个人' : '群组';
+            ctx.reply(`✅ 系统已连接！通知已绑定到当前${type} (ID: ${chatId})`);
+        } catch (e) { ctx.reply("⚠️ 数据库连接错误"); }
     });
 
-    // 2. /ck 查看状态
+    // 2. 查状态
     bot.command('ck', async (ctx) => {
         try {
-            const userCount = await prisma.user.count();
-            const msgCount = await prisma.message.count();
-            ctx.reply(`📊 **数据库连接正常**\n👤 客户总数: ${userCount} 人\n💬 消息总数: ${msgCount} 条`);
-        } catch (error) {
-            console.error("查询失败:", error);
-            ctx.reply("❌ 无法连接数据库。\n请检查是否在 Shell 运行了 'npx prisma db push'");
-        }
+            const u = await prisma.user.count();
+            const m = await prisma.message.count();
+            ctx.reply(`📊 用户数: ${u} | 消息数: ${m}`);
+        } catch (e) { ctx.reply("❌ 数据库连接失败"); }
     });
 
-    // 3. /zc 设置密码
+    // 3. 改密码
     bot.command('zc', async (ctx) => {
-        const text = ctx.message.text.trim();
-        const parts = text.split(/\s+/);
-        if (parts.length < 2) return ctx.reply("❌ 格式错误。请发送：/zc 新密码");
-        
+        const p = ctx.message.text.split(/\s+/)[1];
+        if (!p) return ctx.reply("❌ 用法: /zc 新密码");
         try {
             await prisma.globalConfig.upsert({
                 where: { key: 'admin_password' },
-                update: { value: parts[1] },
-                create: { key: 'admin_password', value: parts[1] }
+                update: { value: p },
+                create: { key: 'admin_password', value: p }
             });
-            ctx.reply(`✅ 密码已更新为：${parts[1]}`);
-        } catch (error) {
-            ctx.reply("❌ 密码保存失败，数据库错误。");
-        }
+            ctx.reply(`✅ 密码已更新`);
+        } catch (e) { ctx.reply("❌ 失败"); }
     });
 
-    // 4. /del 删除用户
-    bot.command('del', async (ctx) => {
-        const parts = ctx.message.text.trim().split(/\s+/);
-        if (parts.length < 2) return ctx.reply("❌ 格式错误。请发送：/del 用户ID");
-        
+    // 4. 清库 (按钮确认版)
+    bot.command('sjkqk', (ctx) => {
+        ctx.reply('⚠️ **警告**：确定要删除所有数据吗？', 
+            Markup.inlineKeyboard([
+                [Markup.button.callback('❌ 取消', 'cancel_clear'), Markup.button.callback('✅ 确认清空', 'confirm_clear')]
+            ])
+        );
+    });
+    
+    // 处理清库按钮
+    bot.action('confirm_clear', async (ctx) => {
         try {
-            await prisma.user.delete({ where: { id: parts[1] } });
-            io.emit('admin_user_deleted', parts[1]);
-            ctx.reply(`🗑️ 用户 ${parts[1]} 已成功删除。`);
-        } catch (error) {
-            ctx.reply("❌ 删除失败，未找到该用户。");
+            await prisma.message.deleteMany({});
+            await prisma.user.deleteMany({});
+            io.emit('admin_db_cleared');
+            await ctx.editMessageText("💥 数据库已清空");
+        } catch (e) { await ctx.editMessageText("❌ 清空失败"); }
+    });
+    
+    bot.action('cancel_clear', async (ctx) => {
+        await ctx.editMessageText("🛡️ 操作已取消");
+    });
+
+    // 5. 按钮回调：删除指定用户
+    bot.action(/del_user_(.+)/, async (ctx) => {
+        const targetId = ctx.match[1];
+        try {
+            await prisma.user.delete({ where: { id: targetId } });
+            io.emit('admin_user_deleted', targetId);
+            await ctx.editMessageText(`🗑️ 用户 \`${targetId}\` 已删除。`, { parse_mode: 'Markdown' });
+        } catch (e) {
+            await ctx.answerCbQuery("删除失败或用户已不存在");
         }
     });
 
-    // 5. /sjkqk 清空数据库 (第一步：申请)
-    bot.command('sjkqk', async (ctx) => {
-        const userId = ctx.from.id;
-        pendingClear.add(userId); // 加入待确认列表
-        
-        ctx.reply("⚠️ **高能预警！** ⚠️\n\n此操作将 **永久删除** 所有客户和聊天记录！\n\n请在 30 秒内发送 /qr 进行最终确认。");
-
-        // 30秒后自动取消资格
-        setTimeout(() => {
-            if (pendingClear.has(userId)) {
-                pendingClear.delete(userId);
-                ctx.reply("⏳ 操作超时，清库请求已自动取消。");
-            }
-        }, 30000);
-    });
-
-    // 6. /qr 确认清空 (第二步：执行)
-    bot.command('qr', async (ctx) => {
-        const userId = ctx.from.id;
-        
-        if (pendingClear.has(userId)) {
-            try {
-                await prisma.message.deleteMany({});
-                await prisma.user.deleteMany({});
-                io.emit('admin_db_cleared');
-                ctx.reply("💥 **操作成功**：数据库已格式化，所有数据已清空。");
-            } catch (error) {
-                ctx.reply("❌ 清空失败，数据库发生错误。");
-            }
-            pendingClear.delete(userId); // 移除标记
-        } else {
-            ctx.reply("❓ 没有待确认的指令。请先发送 /sjkqk");
-        }
-    });
-
-    bot.launch().catch(err => console.error("机器人启动失败:", err));
+    bot.launch().catch(err => console.error(err));
     process.once('SIGINT', () => bot.stop('SIGINT'));
     process.once('SIGTERM', () => bot.stop('SIGTERM'));
-} else {
-    console.log("⚠️ 警告: 未检测到 BOT_TOKEN，机器人功能无法使用。");
 }
 
-// ================= 网页后端接口 =================
-
-// 登录验证
+// ================= API 接口 =================
 app.post('/api/admin/login', async (req, res) => {
     const { password } = req.body;
-    try {
-        const dbConfig = await prisma.globalConfig.findUnique({ where: { key: 'admin_password' } });
-        const validPwd = (dbConfig && dbConfig.value) || process.env.ADMIN_PASSWORD || "123456";
-
-        if (password === validPwd) {
-            res.json({ success: true, msg: "登录成功" });
-        } else {
-            res.status(401).json({ success: false, msg: "密码错误" });
-        }
-    } catch (error) {
-        res.status(500).json({ success: false, msg: "服务器验证出错" });
-    }
+    const dbConfig = await prisma.globalConfig.findUnique({ where: { key: 'admin_password' } });
+    const validPwd = (dbConfig && dbConfig.value) || process.env.ADMIN_PASSWORD || "123456";
+    if (password === validPwd) res.json({ success: true });
+    else res.status(401).json({ success: false });
 });
 
-// 获取用户列表
 app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await prisma.user.findMany({
@@ -145,64 +121,89 @@ app.get('/api/admin/users', async (req, res) => {
             include: { messages: { take: 1, orderBy: { createdAt: 'desc' } } }
         });
         res.json(users);
-    } catch (error) { res.status(500).json([]); }
+    } catch (e) { res.json([]); }
 });
 
-// 获取聊天记录
 app.get('/api/history/:userId', async (req, res) => {
     try {
-        const history = await prisma.message.findMany({
+        const msgs = await prisma.message.findMany({
             where: { userId: req.params.userId },
             orderBy: { createdAt: 'asc' }
         });
-        res.json(history);
-    } catch (error) { res.status(500).json([]); }
+        res.json(msgs);
+    } catch (e) { res.json([]); }
 });
 
-// Socket.io 实时通讯
+// 托管 admin.html (方便你直接访问)
+app.get('/admin', (req, res) => {
+    res.sendFile(__dirname + '/admin.html');
+});
+
+// ================= Socket 通讯 =================
 io.on('connection', (socket) => {
     socket.on('join', async ({ userId, bossId, isAdmin }) => {
-        if (isAdmin) {
-            socket.join('admin_room');
-        } else if (userId) {
+        if (isAdmin) socket.join('admin_room');
+        else if (userId) {
             socket.join(userId);
             if (bossId) {
-                try {
-                    await prisma.user.upsert({
-                        where: { id: userId },
-                        update: { bossId },
-                        create: { id: userId, bossId }
-                    });
-                } catch(e) {}
+                prisma.user.upsert({
+                    where: { id: userId },
+                    update: { bossId },
+                    create: { id: userId, bossId }
+                }).catch(()=>{});
             }
         }
     });
 
     socket.on('send_message', async ({ userId, content, bossId }) => {
-        try {
-            const msg = await prisma.message.create({
-                data: { userId, content, isFromUser: true }
-            });
-            const user = await prisma.user.upsert({
-                where: { id: userId },
-                update: { updatedAt: new Date(), bossId: bossId || '未知' },
-                create: { id: userId, bossId: bossId || '未知' }
-            });
-            io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: user.bossId });
-        } catch(e) { console.error("消息保存失败:", e); }
+        // 存库
+        const msg = await prisma.message.create({ data: { userId, content, isFromUser: true } });
+        
+        // 更新用户
+        const user = await prisma.user.upsert({
+            where: { id: userId },
+            update: { updatedAt: new Date(), bossId: bossId || '未知' },
+            create: { id: userId, bossId: bossId || '未知' }
+        });
+
+        // 推送给网页
+        io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: user.bossId });
+
+        // 🔥 TG 通知 (含 @提醒 和 删除按钮)
+        if (bot) {
+            try {
+                const config = await prisma.globalConfig.findUnique({ where: { key: 'admin_tg_id' } });
+                if (config && config.value) {
+                    let mentionTag = "";
+                    if (bossId && bossId !== '未知') {
+                        const cleanId = bossId.replace('@', ''); 
+                        mentionTag = `@${cleanId}`; // 生成 @iibb8
+                    }
+                    
+                    const isImg = content.startsWith('data:image');
+                    const textDisplay = isImg ? "📷 [图片]" : content.substring(0, 100);
+
+                    const alertMsg = `${mentionTag} 🔔 **新消息**\n👤: \`${userId.slice(0,6)}\`\n🏷️: ${bossId}\n💬: ${textDisplay}`;
+                    
+                    // 发送带按钮的消息
+                    bot.telegram.sendMessage(config.value, alertMsg, { 
+                        parse_mode: 'Markdown',
+                        ...Markup.inlineKeyboard([
+                            [Markup.button.callback(`🗑️ 删除此用户`, `del_user_${userId}`)]
+                        ])
+                    });
+                }
+            } catch (e) {}
+        }
     });
 
     socket.on('admin_reply', async ({ targetUserId, content }) => {
-        try {
-            const msg = await prisma.message.create({
-                data: { userId: targetUserId, content, isFromUser: false }
-            });
-            io.to(targetUserId).emit('receive_message', msg);
-            io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: 'System' });
-        } catch(e) { console.error("回复失败:", e); }
+        const msg = await prisma.message.create({ data: { userId: targetUserId, content, isFromUser: false } });
+        io.to(targetUserId).emit('receive_message', msg);
+        io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: 'System' });
     });
 });
 
 server.listen(PORT, () => {
-    console.log(`🚀 服务器已启动，端口: ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
