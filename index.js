@@ -38,7 +38,7 @@ if (BOT_TOKEN) {
                 create: { key: 'admin_tg_id', value: chatId }
             });
             const type = ctx.chat.type === 'private' ? '个人' : '群组';
-            ctx.reply(`✅ 系统已连接！通知已绑定到当前${type} (ID: ${chatId})`);
+            ctx.reply(`✅ 系统已连接！通知已绑定到当前${type} (ID: ${chatId})\n\n请测试发送消息，如果老板ID是 iibb8，系统会自动艾特 @iibb8`);
         } catch (e) { ctx.reply("⚠️ 数据库连接错误"); }
     });
 
@@ -80,6 +80,7 @@ if (BOT_TOKEN) {
             await prisma.message.deleteMany({});
             await prisma.user.deleteMany({});
             io.emit('admin_db_cleared');
+            io.emit('force_logout_all'); // 全局踢人
             await ctx.editMessageText("💥 数据库已清空");
         } catch (e) { await ctx.editMessageText("❌ 清空失败"); }
     });
@@ -94,6 +95,7 @@ if (BOT_TOKEN) {
         try {
             await prisma.user.delete({ where: { id: targetId } });
             io.emit('admin_user_deleted', targetId);
+            io.to(targetId).emit('force_logout'); // 🔥 强制踢下线
             await ctx.editMessageText(`🗑️ 用户 \`${targetId}\` 已删除。`, { parse_mode: 'Markdown' });
         } catch (e) {
             await ctx.answerCbQuery("删除失败或用户已不存在");
@@ -134,7 +136,7 @@ app.get('/api/history/:userId', async (req, res) => {
     } catch (e) { res.json([]); }
 });
 
-// 托管 admin.html (方便你直接访问)
+// 托管 admin.html (方便直接访问)
 app.get('/admin', (req, res) => {
     res.sendFile(__dirname + '/admin.html');
 });
@@ -155,9 +157,15 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('send_message', async ({ userId, content, bossId }) => {
+    socket.on('send_message', async ({ userId, content, type, bossId }) => {
+        // 自动判断图片类型
+        let finalType = type || 'text';
+        if (content.startsWith('data:image')) finalType = 'image';
+
         // 存库
-        const msg = await prisma.message.create({ data: { userId, content, isFromUser: true } });
+        const msg = await prisma.message.create({ 
+            data: { userId, content, type: finalType, isFromUser: true } 
+        });
         
         // 更新用户
         const user = await prisma.user.upsert({
@@ -177,10 +185,10 @@ io.on('connection', (socket) => {
                     let mentionTag = "";
                     if (bossId && bossId !== '未知') {
                         const cleanId = bossId.replace('@', ''); 
-                        mentionTag = `@${cleanId}`; // 生成 @iibb8
+                        mentionTag = `@${cleanId}`; // 自动生成 @iibb8
                     }
                     
-                    const isImg = content.startsWith('data:image');
+                    const isImg = finalType === 'image';
                     const textDisplay = isImg ? "📷 [图片]" : content.substring(0, 100);
 
                     const alertMsg = `${mentionTag} 🔔 **新消息**\n👤: \`${userId.slice(0,6)}\`\n🏷️: ${bossId}\n💬: ${textDisplay}`;
@@ -197,8 +205,13 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('admin_reply', async ({ targetUserId, content }) => {
-        const msg = await prisma.message.create({ data: { userId: targetUserId, content, isFromUser: false } });
+    socket.on('admin_reply', async ({ targetUserId, content, type }) => {
+        let finalType = type || 'text';
+        if (content.startsWith('data:image')) finalType = 'image';
+
+        const msg = await prisma.message.create({ 
+            data: { userId: targetUserId, content, type: finalType, isFromUser: false } 
+        });
         io.to(targetUserId).emit('receive_message', msg);
         io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: 'System' });
     });
