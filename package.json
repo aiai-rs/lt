@@ -4,6 +4,7 @@
   "description": "HY International Chat Backend",
   "main": "index.js",
   "scripts": {
+    "postinstall": "prisma generate",
     "start": "node index.js"
   },
   "dependencies": {
