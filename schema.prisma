@@ -19,6 +19,7 @@ model Message {
   id         Int      @id @default(autoincrement())
   content    String
   isFromUser Boolean
+  type       String   @default("text") // 
   createdAt  DateTime @default(now())
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
