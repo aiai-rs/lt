@@ -1,197 +1,166 @@
-// index.js - 汇盈国际后端 (Bot通知 + 网页管理 + 指令控制)
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
-const { Telegraf, Markup } = require('telegraf');
+const { Server } = require("socket.io");
 const { PrismaClient } = require('@prisma/client');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json());
 
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" }, 
-  pingTimeout: 60000,
-});
+// 允许网页端连接
+const io = new Server(server, { cors: { origin: "*" } });
 
 const prisma = new PrismaClient();
-const bot = new Telegraf(process.env.BOT_TOKEN);
+const port = process.env.PORT || 10000;
 
-// 老板对应的 TG 群组 ID
-const BOSS_GROUPS = {
-  '@rrii8': process.env.GROUP_ID_RR, 
-  '@iibb8': process.env.GROUP_ID_II 
-};
+// ==========================================
+//  Bot 专用接口 (对应你的 4 点要求)
+// ==========================================
 
-// ================= TG 机器人逻辑 =================
+// 【需求 1】: 接收新消息 -> 只通知，不回复
+// Bot 收到用户消息后，POST 到这里
+app.post('/api/bot/message', async (req, res) => {
+  const { userId, content, bossId } = req.body;
+  if (!userId || !content) return res.status(400).send("缺参数");
 
-// 1. 监听删除按钮的回调 (点击 [彻底抹除该用户] 触发)
-bot.action(/del_(.+)/, async (ctx) => {
-    const userId = ctx.match[1];
-    try {
-        // 数据库物理删除
-        await prisma.message.deleteMany({ where: { userId } });
-        await prisma.user.delete({ where: { id: userId } }).catch(() => {});
-        
-        // 踢下线前端
-        io.to(userId).emit('force_logout');
-        io.emit('admin_user_deleted', userId); // 通知后台网页刷新
-
-        await ctx.answerCbQuery("✅ 执行成功：数据已焚毁");
-        await ctx.editMessageText(`🗑 该用户 (#${userId}) 已被物理清除。`, { parse_mode: 'Markdown' });
-    } catch (e) {
-        await ctx.answerCbQuery("❌ 删除失败或用户已不存在");
-    }
-});
-
-// 2. 监听清空数据库按钮 (点击 [确认清空所有数据] 触发)
-bot.action('confirm_reset_db', async (ctx) => {
-    try {
-        await prisma.message.deleteMany({});
-        await prisma.user.deleteMany({});
-        
-        // 广播全员下线
-        io.emit('force_logout'); 
-        
-        await ctx.answerCbQuery("✅ 数据库已重置");
-        await ctx.editMessageText("☢️ **全站数据已清空**\n就像没人来过一样。", { parse_mode: 'Markdown' });
-    } catch (e) {
-        console.error(e);
-        await ctx.answerCbQuery("❌ 操作失败");
-    }
-});
-
-// 3. 【修改】指令: 查看数据统计 /ck
-bot.command('ck', async (ctx) => {
-    try {
-        const userCount = await prisma.user.count();
-        const msgCount = await prisma.message.count();
-        ctx.reply(`📊 **数据库当前状态**\n\n👤 活跃用户: ${userCount} 人\n💬 存储消息: ${msgCount} 条`, { parse_mode: 'Markdown' });
-    } catch (e) {
-        ctx.reply("❌ 无法连接数据库，请检查后端配置。");
-    }
-});
-
-// 4. 【修改】指令: 一键清空数据库 /sjkqc
-bot.command('sjkqc', async (ctx) => {
-    ctx.reply("⚠️ **高危操作警告**\n\n您正在请求清空整个数据库！这将删除所有用户和聊天记录，且**无法恢复**。\n\n请确认：", 
-        Markup.inlineKeyboard([
-            Markup.button.callback('☢️ 确认清空所有数据', 'confirm_reset_db'),
-            Markup.button.callback('❌ 取消', 'cancel_action')
-        ])
-    );
-});
-
-bot.action('cancel_action', (ctx) => ctx.deleteMessage());
-
-
-// ================= Socket.io 逻辑 (用户端 + 管理端) =================
-
-io.on('connection', (socket) => {
-  
-  // --- 用户端逻辑 ---
-  socket.on('join', async ({ userId, bossId }) => {
-    socket.join(userId); 
-    // 更新用户状态
-    await prisma.user.upsert({
-      where: { id: userId },
-      update: { socketId: socket.id, bossId },
-      create: { id: userId, bossId, socketId: socket.id }
-    });
-    // 通知管理端有新人（如果管理端在线）
-    io.to('admin_room').emit('new_user_online', { userId, bossId });
-  });
-
-  socket.on('send_message', async (data) => {
-    const { userId, bossId, content, type } = data;
-
-    // 1. 存库
-    await prisma.message.create({
-      data: { content, type, isFromUser: true, userId }
-    });
-
-    // 2. 转发给管理端网页 (如果业务员在后台网页看着)
-    io.to('admin_room').emit('admin_receive_message', {
-        ...data,
-        createdAt: new Date()
-    });
-
-    // 3. 发送 TG 通知 (带删除按钮)
-    const groupId = BOSS_GROUPS[bossId];
-    if (groupId) {
-      const text = `🔔 **新消息** (${bossId})\n用户: \`#${userId}\`\n内容: ${type === 'image' ? '[图片]' : content}`;
-      
-      const keyboard = Markup.inlineKeyboard([
-          Markup.button.callback(`🗑️ 删除此人`, `del_${userId}`)
-      ]);
-
-      try {
-        await bot.telegram.sendMessage(groupId, text, { parse_mode: 'Markdown', ...keyboard });
-      } catch (e) {
-        console.error("TG通知失败", e);
-      }
-    }
-  });
-
-  // --- 管理端逻辑 (业务员后台) ---
-  socket.on('admin_join', () => {
-      socket.join('admin_room'); // 业务员加入管理频道
-  });
-
-  socket.on('admin_reply', async (data) => {
-      const { targetUserId, content } = data;
-      
-      // 1. 存库
-      await prisma.message.create({
-          data: { content, type: 'text', isFromUser: false, userId: targetUserId }
-      });
-
-      // 2. 发给用户
-      io.to(targetUserId).emit('receive_message', {
-          content,
-          type: 'text',
-          isFromUser: false,
-          createdAt: new Date()
-      });
-  });
-});
-
-// ================= API 接口 =================
-
-// 获取所有用户列表 (供后台使用)
-app.get('/api/admin/users', async (req, res) => {
-    try {
-        const users = await prisma.user.findMany({
-            orderBy: { createdAt: 'desc' },
-            include: { _count: { select: { messages: true } } }
-        });
-        res.json(users);
-    } catch (e) {
-        res.status(500).json([]);
-    }
-});
-
-// 获取某人的聊天记录
-app.get('/api/history/:userId', async (req, res) => {
   try {
-    const history = await prisma.message.findMany({
-      where: { userId: req.params.userId },
-      orderBy: { createdAt: 'asc' }
+    // 1. 找用户，没有就建
+    let user = await prisma.user.findUnique({ where: { id: String(userId) } });
+    
+    // 如果是新用户，通知网页端
+    if (!user) {
+      user = await prisma.user.create({ 
+        data: { id: String(userId), bossId: bossId || '未知来源' } 
+      });
+      io.emit('new_user_online', user); 
+    } else {
+      // 老用户更新时间
+      await prisma.user.update({ 
+        where: { id: String(userId) }, 
+        data: { updatedAt: new Date() }
+      });
+    }
+
+    // 2. 存入数据库
+    const msg = await prisma.message.create({
+      data: {
+        content,
+        userId: String(userId),
+        isFromUser: true // 标记为客户发的
+      }
     });
-    res.json(history);
+
+    // 3. 【关键】只推送给网页总控台，不返回任何自动回复内容
+    io.emit('admin_receive_message', { ...msg, bossId: user.bossId });
+
+    console.log(`收到 ${bossId} 旗下客户 ${userId} 的消息，已推送给网页。`);
+    res.json({ success: true, status: "notified" });
+
   } catch (e) {
-    res.status(500).json([]);
+    console.error("接收消息出错:", e);
+    res.status(500).send("Server Error");
   }
 });
 
-// 启动
-const PORT = process.env.PORT || 3000;
-bot.launch();
-server.listen(PORT, () => {
-  console.log(`Backend running on ${PORT}`);
+// 【需求 2】: 删除指定用户 (Bot 点击删除按钮后调用)
+// Bot 调用这里：POST /api/bot/delete body: { userId: "xxx" }
+app.post('/api/bot/delete', async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).send("缺 ID");
+
+  try {
+    // 物理删除：因为 Schema 里设置了 Cascade，删人会自动删掉他的所有聊天记录
+    await prisma.user.delete({ where: { id: String(userId) } });
+
+    // 通知网页端把这个人踢掉
+    io.emit('admin_user_deleted', userId);
+
+    console.log(`指令执行：用户 ${userId} 已被彻底抹除。`);
+    res.json({ success: true, msg: "已彻底删除该用户及所有数据" });
+  } catch (e) {
+    res.json({ success: false, msg: "删除失败，可能用户早已不存在" });
+  }
 });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// 【需求 3】: /ck 指令 (查看数据库数据)
+// Bot 收到 /ck 后调用这里：GET /api/bot/check
+app.get('/api/bot/check', async (req, res) => {
+  try {
+    const userCount = await prisma.user.count();
+    const msgCount = await prisma.message.count();
+    
+    // 返回给 Bot 显示的文案
+    const text = `📊 **数据库当前状态**\n\n👤 客户总数: ${userCount} 人\n💬 消息总数: ${msgCount} 条\n\n✅ 状态: 运行正常`;
+    
+    res.json({ text });
+  } catch (e) {
+    res.status(500).json({ text: "❌ 数据库读取失败" });
+  }
+});
+
+// 【需求 4】: /sjkqk 指令 (一键清空数据库)
+// Bot 收到 /sjkqk 后调用这里：POST /api/bot/clear_all
+app.post('/api/bot/clear_all', async (req, res) => {
+  try {
+    // 执行核平指令
+    await prisma.message.deleteMany({}); // 先删消息
+    await prisma.user.deleteMany({});    // 再删人
+
+    // 通知网页端刷新
+    io.emit('admin_db_cleared');
+
+    console.log("⚠️ 警告：数据库已被一键清空！");
+    res.json({ success: true, msg: "♻️ 数据库已成功格式化，所有数据已清空。" });
+  } catch (e) {
+    res.status(500).json({ success: false, msg: "清空失败: " + e.message });
+  }
+});
+
+
+// ==========================================
+//  网页端接口 (给你的黑色总控台用)
+// ==========================================
+
+// 获取用户列表
+app.get('/api/admin/users', async (req, res) => {
+  const users = await prisma.user.findMany({ 
+    orderBy: { updatedAt: 'desc' },
+    include: { _count: { select: { messages: true } } }
+  });
+  res.json(users);
+});
+
+// 获取聊天历史
+app.get('/api/history/:userId', async (req, res) => {
+  const msgs = await prisma.message.findMany({ 
+    where: { userId: req.params.userId },
+    orderBy: { createdAt: 'asc' }
+  });
+  res.json(msgs);
+});
+
+// WebSocket (网页端人工回复)
+io.on('connection', (socket) => {
+  console.log('老板已连接控制台');
+
+  socket.on('admin_reply', async (data) => {
+    const { targetUserId, content } = data;
+    
+    // 1. 存库
+    await prisma.message.create({
+      data: { userId: targetUserId, content, isFromUser: false }
+    });
+
+    console.log(`老板人工回复给 ${targetUserId}: ${content}`);
+    
+    // 注意：这里只是存库。
+    // 你的 Bot 需要有一个机制来把这条消息发给真正的 TG 用户。
+    // 通常 Bot 会轮询或者这里直接调 Bot 发送 API。
+  });
+});
+
+server.listen(port, () => {
+  console.log(`Bot 智能大脑已在端口 ${port} 就绪`);
+});
