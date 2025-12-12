@@ -1,7 +1,7 @@
 {
   "name": "huiying-backend",
-  "version": "4.0.0",
-  "description": "HY System Final",
+  "version": "5.0.0",
+  "description": "HY System Final Stable",
   "main": "index.js",
   "scripts": {
     "postinstall": "prisma generate",
