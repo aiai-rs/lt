@@ -6,3 +6,12 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+// --- 新增部分 ---
+// 这是一个必须的“占位”模型，为了让部署不报错。
+// 如果你的 index.js 以后需要存特定数据，我们可以再改这里。
+model User {
+  id    Int     @id @default(autoincrement())
+  email String  @unique
+  name  String?
+}
