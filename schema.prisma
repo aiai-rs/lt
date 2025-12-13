@@ -11,10 +11,22 @@ model User {
   id        String   @id
   bossId    String?
   isMuted   Boolean  @default(false)
-  isBlocked Boolean  @default(false) // 新增：拉黑状态
+  isBlocked Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   messages  Message[]
+  // PWA 订阅关联
+  pushSubscriptions PushSubscription[]
+}
+
+// 推送订阅表
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  endpoint  String   @unique
+  keys      Json     // 自动存 p256dh 和 auth
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
 }
 
 model Message {
