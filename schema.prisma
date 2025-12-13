@@ -21,8 +21,7 @@ model Message {
   content    String
   isFromUser Boolean
   type       String   @default("text")
-  // 🔥 新增状态: sent(已发送) / delivered(已送达) / read(已读)
-  status     String   @default("sent") 
+  status     String   @default("sent") // sent=已发, read=已读
   createdAt  DateTime @default(now())
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
