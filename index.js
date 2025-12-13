@@ -22,31 +22,29 @@ const prisma = new PrismaClient();
 
 // 内存数据
 const onlineUsers = new Set();
-// 记录哪些Socket连接已经收到过“休息中”的自动回复，避免刷屏
 const socketAutoReplyHistory = new Set();
 
 const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ALLOWED_GROUP_ID = '-1003091925643'; // 建议放入 .env
+const ALLOWED_GROUP_ID = '-1003091925643';
 
-// --- 业务逻辑配置 ---
+// 业务配置
 const WELCOME_MESSAGE = `👋 您好！
-这是一个教学演示界面。
+这里是汇盈国际业务员。
 
-👨‍💻 业务员正在与您连接...
+👨‍💻 业务员正在与您连接...你可以正常发送消息
 我们将教您如何正确使用 Telegram 与老板直接沟通。
 
 ⏰ 业务员上班时间 (柬埔寨时间):
 下午 13:00 - 晚上 23:00`;
 
 const REST_MESSAGE = `💤 当前是休息时间 (柬埔寨 13:00-23:00 以外)。
-有事请留言，业务员上班后会第一时间回复您！`;
+有事请留言，业务员上班后会第一时间回复你！`;
 
-// 检查是否在柬埔寨工作时间 (UTC+7, 13:00-23:00)
 const isCambodiaWorkingTime = () => {
     const now = new Date();
     const utcHours = now.getUTCHours();
-    const cambodiaHours = (utcHours + 7) % 24; // 修正跨天问题
+    const cambodiaHours = (utcHours + 7) % 24;
     return cambodiaHours >= 13 && cambodiaHours < 23;
 };
 
@@ -56,23 +54,93 @@ const generateShortId = () => Math.floor(100000 + Math.random() * 900000).toStri
 if (BOT_TOKEN) {
     bot = new Telegraf(BOT_TOKEN);
     console.log("🤖 Bot 启动...");
-    bot.on(['my_chat_member', 'new_chat_members', 'message'], async (ctx, next) => {
-        if (ctx.chat.type === 'private') return next();
-        if (String(ctx.chat.id) !== ALLOWED_GROUP_ID) {
-            try { await ctx.leaveChat(); } catch(e){}
-            return;
+
+    // 权限校验中间件
+    bot.use(async (ctx, next) => {
+        if (ctx.chat && (ctx.chat.type === 'private' || String(ctx.chat.id) !== ALLOWED_GROUP_ID)) {
+             // 不在群里不响应，或者退出
+             if(ctx.chat.type !== 'private') try { await ctx.leaveChat(); } catch(e){}
+             return;
         }
         return next();
     });
-    bot.start(async (ctx) => {
-        if (String(ctx.chat.id) !== ALLOWED_GROUP_ID) return;
-        ctx.reply(`✅ 系统在线\n绑定群组: \`${ALLOWED_GROUP_ID}\``);
+
+    bot.start((ctx) => ctx.reply(`✅ 系统在线\n绑定群组: \`${ALLOWED_GROUP_ID}\`\n输入 /bz 查看指令`));
+
+    // 1. 帮助指令 /bz
+    bot.command('bz', (ctx) => {
+        ctx.reply(`🛠️ **机器人指令帮助**
+/bz - 显示此帮助信息
+/ck - 查看当前用户列表 & 数据概览 (含删除按钮)
+/sjkqk - ⚠️ 清空整个数据库 (慎用)
+/zc  - 
+/删除 ID - 删除指定用户
+        `, { parse_mode: 'Markdown' });
     });
-    bot.hears(/^删除\s+(\d+)$/, (ctx) => {
-        if (String(ctx.chat.id) !== ALLOWED_GROUP_ID) return;
-        const targetId = ctx.match[1];
-        ctx.reply(`⚠️ 确认删除 ${targetId}?`, Markup.inlineKeyboard([[Markup.button.callback('❌ 取消', 'cancel'), Markup.button.callback('✅ 确认', `del_${targetId}`)]]));
+
+    // 2. 数据核弹 /sjkqk
+    bot.command('sjkqk', (ctx) => {
+        ctx.reply('⚠️ 高危操作警告 ⚠️\n此操作将删除所有用户和聊天记录，且不可恢复！\n\n请确认：', 
+            Markup.inlineKeyboard([
+                [Markup.button.callback('❌ 取消', 'cancel')],
+                [Markup.button.callback('💥 确认清空所有数据', 'confirm_clear_all')]
+            ])
+        );
     });
+
+    bot.action('confirm_clear_all', async (ctx) => {
+        try {
+            await prisma.message.deleteMany({});
+            await prisma.user.deleteMany({});
+            // 通知所有端
+            io.emit('admin_db_cleared');
+            io.emit('force_logout_all');
+            onlineUsers.clear();
+            await ctx.editMessageText("💥 数据库已完全重置\n所有数据已清除，系统如新。");
+        } catch (e) {
+            await ctx.editMessageText(`❌ 清空失败: ${e.message}`);
+        }
+    });
+
+    // 3. 超级查询 /ck
+    bot.command('ck', async (ctx) => {
+        try {
+            const userCount = await prisma.user.count();
+            const msgCount = await prisma.message.count();
+            // 获取最近活跃的 10 个用户用于展示（避免按钮过多报错）
+            const users = await prisma.user.findMany({
+                take: 10,
+                orderBy: { updatedAt: 'desc' },
+                include: { _count: { select: { messages: true } } }
+            });
+
+            let text = `📊 数据概览\n👥 总用户: ${userCount}\n💬 总消息: ${msgCount}\n\n📝 最近活跃用户 (Top 10):\n`;
+            const buttons = [];
+
+            users.forEach(u => {
+                const boss = u.bossId || '无';
+                text += `🆔 \`${u.id}\` | 👤 ${boss} | 💬 ${u._count.messages}\n`;
+                // 每行放一个删除按钮
+                buttons.push([Markup.button.callback(`🗑️ 删除 ${u.id}`, `del_${u.id}`)]);
+            });
+
+            buttons.push([Markup.button.callback('❌ 关闭', 'cancel')]);
+
+            await ctx.reply(text, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+        } catch (e) {
+            ctx.reply("❌ 查询失败");
+        }
+    });
+
+    bot.command('zc', async (ctx) => {
+        const p = ctx.message.text.split(/\s+/)[1];
+        if(!p) return ctx.reply("❌ 用法: ");
+        await prisma.globalConfig.upsert({ where: { key: 'admin_password' }, update: { value: p }, create: { key: 'admin_password', value: p } });
+        io.emit('force_admin_relogin');
+        ctx.reply("✅ ");
+    });
+
+    // 删除回调
     bot.action(/del_(.+)/, async (ctx) => {
         const targetId = ctx.match[1];
         try {
@@ -81,10 +149,13 @@ if (BOT_TOKEN) {
             io.to(targetId).emit('force_logout');
             onlineUsers.delete(targetId);
             io.to('admin_room').emit('user_status_change', { userId: targetId, online: false });
-            await ctx.editMessageText(`🗑️ 用户 ${targetId} 已删除`);
-        } catch (e) { await ctx.editMessageText("❌ 删除失败"); }
+            await ctx.answerCbQuery(`用户 ${targetId} 已删除`);
+            // 更新一下原来的消息，去掉该按钮（可选，略复杂，这里简单回复）
+            await ctx.reply(`🗑️ 用户 \`${targetId}\` 数据已抹除`, { parse_mode: 'Markdown' });
+        } catch (e) { await ctx.answerCbQuery("删除失败"); }
     });
-    bot.action('cancel', async (ctx) => { await ctx.editMessageText("已取消"); });
+
+    bot.action('cancel', async (ctx) => { await ctx.deleteMessage(); });
     bot.launch().catch(e => console.error(e));
 }
 
@@ -100,9 +171,22 @@ app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await prisma.user.findMany({
             orderBy: { updatedAt: 'desc' },
-            include: { messages: { take: 1, orderBy: { createdAt: 'desc' } }, _count: { select: { messages: true } } }
+            include: { 
+                messages: { take: 1, orderBy: { createdAt: 'desc' } }, 
+                // 关键修改：统计未读消息 (isFromUser=true 且 status='sent')
+                _count: { 
+                    select: { 
+                        messages: { where: { isFromUser: true, status: 'sent' } } 
+                    } 
+                } 
+            }
         });
-        res.json(users);
+        // 映射一下数据结构以匹配前端习惯
+        const formatted = users.map(u => ({
+            ...u,
+            unreadCount: u._count.messages
+        }));
+        res.json(formatted);
     } catch (e) { res.json([]); }
 });
 
@@ -124,21 +208,16 @@ io.on('connection', (socket) => {
             socket.join('admin_room');
             socket.emit('online_users_list', Array.from(onlineUsers));
         } else if (userId) {
-            // 🛑 核心修改：严格检查拉黑状态
             const existingUser = await prisma.user.findUnique({ where: { id: userId } });
-            
             if (existingUser && existingUser.isBlocked) {
-                // 如果被拉黑，直接发消息通知前端并在服务端断开
-                socket.emit('force_logout_blocked', 'Access Denied');
+                socket.emit('force_logout_blocked');
                 socket.disconnect(true);
                 return;
             }
-
             if (!existingUser) {
                 if (bossId) {
                     await prisma.user.create({ data: { id: userId, bossId } });
                     socket.join(userId);
-                    // 🎉 新用户：发送欢迎语
                     const welcomeMsg = await prisma.message.create({
                         data: { userId, content: WELCOME_MESSAGE, type: 'text', isFromUser: false, status: 'sent' }
                     });
@@ -150,17 +229,15 @@ io.on('connection', (socket) => {
             } else {
                 socket.join(userId);
                 if (bossId) await prisma.user.update({ where: { id: userId }, data: { bossId } });
-                
-                // 如果是老用户但没有消息（比如被清空过），也可以补发欢迎语
-                const msgCount = await prisma.message.count({ where: { userId } });
-                if (msgCount === 0) {
-                    const welcomeMsg = await prisma.message.create({
+                // 补发欢迎语逻辑
+                const count = await prisma.message.count({ where: { userId } });
+                if(count === 0) {
+                     const welcomeMsg = await prisma.message.create({
                         data: { userId, content: WELCOME_MESSAGE, type: 'text', isFromUser: false, status: 'sent' }
                     });
                     socket.emit('receive_message', welcomeMsg);
                 }
             }
-
             socket.userId = userId;
             onlineUsers.add(userId);
             io.to('admin_room').emit('user_status_change', { userId, online: true });
@@ -170,7 +247,7 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         if (socket.userId) {
             onlineUsers.delete(socket.userId);
-            socketAutoReplyHistory.delete(socket.id); // 清除该连接的自动回复记录
+            socketAutoReplyHistory.delete(socket.id);
             io.to('admin_room').emit('user_status_change', { userId: socket.userId, online: false });
         }
     });
@@ -187,8 +264,11 @@ io.on('connection', (socket) => {
 
     socket.on('mark_read', async ({ userId, isAdmin }) => {
         if (isAdmin) {
+            // 管理员读了消息 -> 用户发的消息变已读
             await prisma.message.updateMany({ where: { userId, isFromUser: true, status: { not: 'read' } }, data: { status: 'read' } });
-            io.to(userId).emit('messages_read_update');
+            io.to(userId).emit('messages_read_update'); // 通知用户
+            // 重要：通知所有管理员（同步红点消除）
+            io.to('admin_room').emit('admin_messages_read_sync', { userId });
         } else {
             await prisma.message.updateMany({ where: { userId, isFromUser: false, status: { not: 'read' } }, data: { status: 'read' } });
             io.to('admin_room').emit('admin_messages_read', { userId });
@@ -197,33 +277,25 @@ io.on('connection', (socket) => {
 
     socket.on('send_message', async ({ userId, content, type, bossId }) => {
         try {
-            // 🛑 二次检查拉黑
             const u = await prisma.user.findUnique({where:{id:userId}});
-            if(u && u.isBlocked) {
-                socket.emit('force_logout_blocked');
-                socket.disconnect(true);
-                return;
-            }
+            if(u && u.isBlocked) { socket.emit('force_logout_blocked'); socket.disconnect(true); return; }
 
             let finalType = type || (content.startsWith('data:image') ? 'image' : 'text');
             const user = await prisma.user.upsert({ where: { id: userId }, update: { updatedAt: new Date(), bossId: bossId || '未知' }, create: { id: userId, bossId: bossId || '未知' } });
             
             const msg = await prisma.message.create({ data: { userId, content, type: finalType, isFromUser: true, status: 'sent' } });
+            
+            // 发送给所有管理员
             io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: user.bossId, isMuted: user.isMuted });
 
-            // 🤖 自动回复逻辑：休息时间
             if (!isCambodiaWorkingTime()) {
-                // 检查当前Socket连接是否已经发送过休息提示
                 if (!socketAutoReplyHistory.has(socket.id)) {
-                    const autoReply = await prisma.message.create({
-                        data: { userId, content: REST_MESSAGE, type: 'text', isFromUser: false, status: 'sent' }
-                    });
-                    // 延迟1秒发送，看起来更自然
+                    const autoReply = await prisma.message.create({ data: { userId, content: REST_MESSAGE, type: 'text', isFromUser: false, status: 'sent' } });
                     setTimeout(() => {
                         socket.emit('receive_message', autoReply);
                         io.to('admin_room').emit('admin_receive_message', { ...autoReply, bossId: 'System_Auto', isMuted: user.isMuted });
                     }, 1000);
-                    socketAutoReplyHistory.add(socket.id); // 标记已发送
+                    socketAutoReplyHistory.add(socket.id);
                 }
             }
 
@@ -233,7 +305,7 @@ io.on('connection', (socket) => {
                     try {
                         let mention = (bossId && bossId!=='未知') ? `@${bossId.replace('@','')}` : '';
                         const txt = finalType === 'image' ? "📷 [图片]" : content.substring(0, 100);
-                        await bot.telegram.sendMessage(ALLOWED_GROUP_ID, `${mention} 🔔 **消息**\nID: \`${userId}\`\n内容: ${txt}`, { 
+                        await bot.telegram.sendMessage(ALLOWED_GROUP_ID, `${mention} 🔔 消息\nID: \`${userId}\`\n内容: ${txt}`, { 
                             parse_mode: 'Markdown',
                             ...Markup.inlineKeyboard([[Markup.button.callback(`🗑️ 删除`, `del_${userId}`)]])
                         });
@@ -251,12 +323,15 @@ io.on('connection', (socket) => {
 
             const msg = await prisma.message.create({ data: { userId: targetUserId, content, type: finalType, isFromUser: false, status: 'sent' } });
             io.to(targetUserId).emit('receive_message', msg);
+            // 广播给所有管理员，确保多开同步
             io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: 'System', tempId });
         } catch(e) { console.error(e); }
     });
 
+    // 核心修改：静音同步
     socket.on('admin_toggle_mute', async ({ userId, isMuted }) => {
         await prisma.user.update({ where: { id: userId }, data: { isMuted } });
+        // 广播给所有人，包括发送者自己
         io.to('admin_room').emit('user_status_update', { userId, isMuted });
     });
 
