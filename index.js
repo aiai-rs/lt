@@ -13,7 +13,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const server = http.createServer(app);
 const io = new Server(server, { 
-    cors: { origin: "*" },
+    cors: { origin: "*" }, 
     maxHttpBufferSize: 1e8,
     pingTimeout: 60000,
     pingInterval: 25000
@@ -29,7 +29,7 @@ const generateShortId = () => Math.floor(100000 + Math.random() * 900000).toStri
 
 if (BOT_TOKEN) {
     bot = new Telegraf(BOT_TOKEN);
-    console.log("🤖 Bot 启动中...");
+    console.log("🤖 Bot 启动...");
 
     bot.on(['my_chat_member', 'new_chat_members', 'message'], async (ctx, next) => {
         if (ctx.chat.type === 'private') return next();
@@ -42,7 +42,7 @@ if (BOT_TOKEN) {
 
     bot.start(async (ctx) => {
         if (String(ctx.chat.id) !== ALLOWED_GROUP_ID) return;
-        ctx.reply(`✅ 系统正常 (群ID: ${ALLOWED_GROUP_ID})`);
+        ctx.reply(`✅ 系统在线\n绑定群组: \`${ALLOWED_GROUP_ID}\``);
     });
 
     bot.hears(/^删除\s+(\d+)$/, (ctx) => {
@@ -56,7 +56,7 @@ if (BOT_TOKEN) {
         try {
             await prisma.user.delete({ where: { id: targetId } });
             io.emit('admin_user_deleted', targetId);
-            io.to(targetId).emit('force_logout'); // 🔥 立即踢人
+            io.to(targetId).emit('force_logout');
             await ctx.editMessageText(`🗑️ 用户 ${targetId} 已删除`);
         } catch (e) { await ctx.editMessageText("❌ 删除失败"); }
     });
@@ -65,7 +65,7 @@ if (BOT_TOKEN) {
 
     bot.command('sjkqk', (ctx) => {
         if (String(ctx.chat.id) !== ALLOWED_GROUP_ID) return;
-        ctx.reply('⚠️ 确定清空所有数据？', Markup.inlineKeyboard([[Markup.button.callback('❌ 取消', 'cancel'), Markup.button.callback('✅ 确认', 'clear_all')]]));
+        ctx.reply('⚠️ 清空数据库？', Markup.inlineKeyboard([[Markup.button.callback('❌ 取消', 'cancel'), Markup.button.callback('✅ 确认清空', 'clear_all')]]));
     });
 
     bot.action('clear_all', async (ctx) => {
@@ -80,10 +80,15 @@ if (BOT_TOKEN) {
 
     bot.command('zc', async (ctx) => {
         const p = ctx.message.text.split(/\s+/)[1];
-        if(!p) return ctx.reply("用法: /zc 密码");
+        if(!p) return ctx.reply("❌ 用法: /zc 密码");
         await prisma.globalConfig.upsert({ where: { key: 'admin_password' }, update: { value: p }, create: { key: 'admin_password', value: p } });
         io.emit('force_admin_relogin');
         ctx.reply("✅ 密码已改，管理员需重登");
+    });
+
+    bot.command('ck', async (ctx) => {
+        const u = await prisma.user.count();
+        ctx.reply(`📊 用户: ${u}`);
     });
 
     bot.launch().catch(e => console.error(e));
@@ -114,13 +119,13 @@ app.get('/api/history/:userId', async (req, res) => {
     } catch(e) { res.json([]); }
 });
 
-app.post('/api/admin/notification', async (req, res) => {
-    await prisma.globalConfig.upsert({ where: { key: 'notification_switch' }, update: { value: req.body.status }, create: { key: 'notification_switch', value: req.body.status } });
-    res.json({ success: true });
-});
 app.get('/api/admin/notification', async (req, res) => {
     const c = await prisma.globalConfig.findUnique({ where: { key: 'notification_switch' } });
     res.json({ status: c ? c.value : 'on' });
+});
+app.post('/api/admin/notification', async (req, res) => {
+    await prisma.globalConfig.upsert({ where: { key: 'notification_switch' }, update: { value: req.body.status }, create: { key: 'notification_switch', value: req.body.status } });
+    res.json({ success: true });
 });
 
 app.get('/admin', (req, res) => res.sendFile(__dirname + '/admin.html'));
@@ -129,24 +134,17 @@ app.get('/admin', (req, res) => res.sendFile(__dirname + '/admin.html'));
 io.on('connection', (socket) => {
     socket.on('request_id', (bid, cb) => cb(generateShortId()));
 
-    // 🔥 核心鉴权：加入房间时检查用户是否存在
     socket.on('join', async ({ userId, isAdmin, bossId }) => {
         if (isAdmin) {
             socket.join('admin_room');
         } else if (userId) {
-            // 🔥 强校验：如果数据库里没有这个ID，说明被删了，强制踢出
-            // 只有当 bossId 存在（初次登录）时才允许 upsert，否则纯 join 必须查库
             const userExists = await prisma.user.findUnique({ where: { id: userId } });
-            
             if (!userExists) {
-                // 如果是新用户注册流程(带着bossId来的)，允许创建
-                if (bossId) {
+                if (bossId) { // 带着 bossId 来的（登录操作）
                     await prisma.user.create({ data: { id: userId, bossId } });
                     socket.join(userId);
                 } else {
-                    // 如果只是凭缓存ID想进来，但数据库没记录 -> 踢！
-                    socket.emit('force_logout');
-                    return;
+                    socket.emit('force_logout'); // 没ID还想连？踢！
                 }
             } else {
                 socket.join(userId);
@@ -155,20 +153,40 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 正在输入
+    // 🔥 正在输入逻辑 (双向转发)
     socket.on('typing', ({ targetId, isTyping }) => {
-        io.to(targetId).emit('display_typing', { isTyping });
+        // 如果是用户发来的，转发给 Admin
+        if (targetId === 'admin') { 
+            // 实际上用户发 typing，targetId 可以是 'admin' 或者忽略，我们需要把用户的ID传给 Admin
+            // 这里假设 socket.rooms 包含 userId
+            const rooms = Array.from(socket.rooms);
+            const uid = rooms.find(r => r !== socket.id); // 找到 userId
+            if(uid) io.to('admin_room').emit('user_typing', { userId: uid, isTyping });
+        } else {
+            // 如果是 Admin 发来的，转发给用户
+            io.to(targetId).emit('display_typing', { isTyping });
+        }
     });
 
-    // 标记已读
-    socket.on('mark_read', async ({ userId }) => {
-        // 更新数据库中该用户发的所有消息为 'read'
-        await prisma.message.updateMany({
-            where: { userId: userId, isFromUser: true, status: { not: 'read' } },
-            data: { status: 'read' }
-        });
-        // 通知用户端变绿勾
-        io.to(userId).emit('messages_read_update');
+    // 🔥 标记已读逻辑
+    socket.on('mark_read', async ({ userId, isAdmin }) => {
+        if (isAdmin) {
+            // 管理员读了用户的消息 -> 更新 isFromUser=true 的消息
+            await prisma.message.updateMany({
+                where: { userId, isFromUser: true, status: { not: 'read' } },
+                data: { status: 'read' }
+            });
+            // 通知该用户：你的消息被读了
+            io.to(userId).emit('messages_read_update'); 
+        } else {
+            // 用户读了管理员的消息 -> 更新 isFromUser=false 的消息
+            await prisma.message.updateMany({
+                where: { userId, isFromUser: false, status: { not: 'read' } },
+                data: { status: 'read' }
+            });
+            // 通知管理员：消息已读
+            io.to('admin_room').emit('admin_messages_read', { userId });
+        }
     });
 
     socket.on('admin_toggle_mute', async ({ userId, isMuted }) => {
@@ -179,23 +197,13 @@ io.on('connection', (socket) => {
     socket.on('send_message', async ({ userId, content, type, bossId }) => {
         try {
             let finalType = type || (content.startsWith('data:image') ? 'image' : 'text');
-            // 确保用户存在
-            const user = await prisma.user.upsert({ 
-                where: { id: userId }, 
-                update: { updatedAt: new Date(), bossId: bossId || '未知' }, 
-                create: { id: userId, bossId: bossId || '未知' } 
-            });
-            // 状态默认为 sent
+            const user = await prisma.user.upsert({ where: { id: userId }, update: { updatedAt: new Date(), bossId: bossId || '未知' }, create: { id: userId, bossId: bossId || '未知' } });
+            
             const msg = await prisma.message.create({ 
                 data: { userId, content, type: finalType, isFromUser: true, status: 'sent' } 
             });
 
-            // 广播
             io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: user.bossId, isMuted: user.isMuted });
-            
-            // 收到后立刻变为 delivered (送达) 并回传给用户
-            // (实际生产中这里可以不做数据库更新，直接socket回执，为了简单先这样)
-            // io.to(userId).emit('message_status_update', { tempId, status: 'delivered' }); 
 
             if (bot && !user.isMuted) {
                 const conf = await prisma.globalConfig.findUnique({ where: { key: 'notification_switch' } });
@@ -210,7 +218,7 @@ io.on('connection', (socket) => {
                     } catch(e) {}
                 }
             }
-        } catch (e) { console.error(e); }
+        } catch(e) { console.error(e); }
     });
 
     socket.on('admin_reply', async ({ targetUserId, content, type, tempId }) => {
@@ -220,12 +228,12 @@ io.on('connection', (socket) => {
             if (!userExists) await prisma.user.create({ data: { id: targetUserId, bossId: 'SystemRestore' } });
 
             const msg = await prisma.message.create({ 
-                data: { userId: targetUserId, content, type: finalType, isFromUser: false, status: 'read' } // 管理员发的默认已读
+                data: { userId: targetUserId, content, type: finalType, isFromUser: false, status: 'sent' } 
             });
             
             io.to(targetUserId).emit('receive_message', msg);
             io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: 'System', tempId });
-        } catch (e) { console.error(e); }
+        } catch(e) { console.error(e); }
     });
 });
 
