@@ -11,6 +11,7 @@ model User {
   id        String   @id
   bossId    String?
   isMuted   Boolean  @default(false)
+  isBlocked Boolean  @default(false) // 新增：拉黑状态
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   messages  Message[]
@@ -21,7 +22,7 @@ model Message {
   content    String
   isFromUser Boolean
   type       String   @default("text")
-  status     String   @default("sent") // sent=已发, read=已读
+  status     String   @default("sent")
   createdAt  DateTime @default(now())
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
