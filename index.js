@@ -65,17 +65,15 @@ const generateShortId = () => {
 // 强制断开指定用户的所有连接 (核心功能)
 const forceDisconnectUser = async (targetId) => {
     try {
-        // 获取该用户房间内的所有 socket 连接
         const sockets = await io.in(targetId).fetchSockets();
         if (sockets.length > 0) {
             console.log(`🔌 正在强制断开用户 ${targetId} 的 ${sockets.length} 个连接...`);
             sockets.forEach(s => {
-                s.emit('force_disconnect'); // 通知前端显示“会话结束”
-                s.disconnect(true);         // 物理断开
+                s.emit('force_disconnect'); 
+                s.disconnect(true);         
             });
         }
         onlineUsers.delete(targetId);
-        // 通知后台该用户下线
         io.to('admin_room').emit('user_status_change', { userId: targetId, online: false });
     } catch (e) {
         console.error(`断开用户 ${targetId} 失败:`, e);
@@ -135,7 +133,6 @@ if (BOT_TOKEN) {
         `, { parse_mode: 'Markdown' });
     });
 
-    // 暴力清空数据库
     bot.command('sjkqk', (ctx) => {
         ctx.reply('⚠️ **高危警告：核弹级操作** ⚠️\n\n此操作将执行以下删除：\n1. ❌ 所有聊天记录\n2. ❌ 所有用户账号 (ID将失效)\n3. ❌ 所有推送订阅\n\n**所有用户将立即掉线且无法找回记录！**\n确定执行吗？', 
             Markup.inlineKeyboard([
@@ -152,11 +149,9 @@ if (BOT_TOKEN) {
             await prisma.message.deleteMany({});
             await prisma.user.deleteMany({});
             
-            // 通知所有前端踢下线
             io.emit('admin_db_cleared');
             io.emit('force_logout_all');
             
-            // 物理断开所有连接
             const sockets = await io.fetchSockets();
             sockets.forEach(s => s.disconnect(true));
 
@@ -209,14 +204,11 @@ if (BOT_TOKEN) {
         }
     });
 
-    // TG 删除用户 (联动断线)
     bot.action(/del_(.+)/, async (ctx) => {
         const targetId = ctx.match[1];
         try {
             await prisma.message.deleteMany({ where: { userId: targetId } });
             await prisma.user.delete({ where: { id: targetId } });
-            
-            // 🚨 核心：立即断开连接
             await forceDisconnectUser(targetId);
             
             io.emit('admin_user_deleted', targetId);
@@ -235,13 +227,11 @@ if (BOT_TOKEN) {
 // 4. Express API 路由接口
 // ==========================================
 
-// 📌 [新增] 检查用户是否存在 (配合前端找回功能)
 app.post('/api/check-user', async (req, res) => {
     const { userId } = req.body;
     try {
         if (!userId) return res.json({ exists: false });
         const user = await prisma.user.findUnique({ where: { id: userId } });
-        // 用户存在且未被拉黑
         if (user && !user.isBlocked) {
             res.json({ exists: true });
         } else {
@@ -252,7 +242,6 @@ app.post('/api/check-user', async (req, res) => {
     }
 });
 
-// 📌 找回账号验证 (兼容旧版接口)
 app.post('/api/user/check', async (req, res) => {
     try {
         const { userId } = req.body;
@@ -264,7 +253,6 @@ app.post('/api/user/check', async (req, res) => {
     }
 });
 
-// 📌 管理员登录
 app.post('/api/admin/login', async (req, res) => {
     const { password } = req.body;
     try {
@@ -347,13 +335,10 @@ app.get('/admin', (req, res) => {
 // 5. Socket.io 核心业务逻辑
 // ==========================================
 io.on('connection', (socket) => {
-    
-    // 📌 [新增] 直接从 URL 参数获取用户 ID (配合新前端)
     const { userId, bossId } = socket.handshake.query;
 
     console.log(`🔌 连接接入: ${socket.id}, UserID: ${userId || '无'}`);
 
-    // 如果携带了 ID，直接加入房间并标记在线
     if (userId) {
         socket.join(userId);
         socket.userId = userId;
@@ -361,14 +346,25 @@ io.on('connection', (socket) => {
         io.to('admin_room').emit('user_status_change', { userId, online: true });
     }
 
-    // [事件] 请求生成新 ID (注册流程)
-    socket.on('request_id', (cb) => {
+    // 🔥 核心修复：接收两个参数 (bid, cb)，防止 TypeError
+    socket.on('request_id', (bid, cb) => {
+        // 兼容处理：如果第一个参数就是函数（说明没传bid）
+        if (typeof bid === 'function') {
+            cb = bid;
+            bid = null;
+        }
+
         const newId = generateShortId();
         console.log(`🆕 分配新ID: ${newId}`);
-        cb(newId);
+        
+        // 安全调用
+        if (typeof cb === 'function') {
+            cb(newId);
+        } else {
+            console.error("❌ request_id 回调不是函数", cb);
+        }
     });
 
-    // [事件] 加入房间 (保留旧版逻辑兼容)
     socket.on('join', async ({ userId, isAdmin, bossId }) => {
         if (isAdmin) {
             socket.join('admin_room');
@@ -376,7 +372,6 @@ io.on('connection', (socket) => {
         } else if (userId) {
             const existingUser = await prisma.user.findUnique({ where: { id: userId } });
             
-            // 如果被拉黑，踢出
             if (existingUser && existingUser.isBlocked) {
                 socket.emit('force_logout_blocked');
                 socket.disconnect(true);
@@ -384,7 +379,6 @@ io.on('connection', (socket) => {
             }
 
             if (!existingUser) {
-                // 只有 SystemRestore 或带 BossID 的才允许注册，防止乱入
                 if (bossId && bossId !== 'SystemRestore') {
                     await prisma.user.create({ data: { id: userId, bossId: bossId } });
                     const welcomeMsg = await prisma.message.create({
@@ -392,7 +386,6 @@ io.on('connection', (socket) => {
                     });
                     socket.emit('receive_message', welcomeMsg);
                 } else {
-                    // 没有正确信息的，拒绝连接
                     socket.emit('force_disconnect'); 
                     socket.disconnect(true);
                     return;
@@ -439,39 +432,29 @@ io.on('connection', (socket) => {
         }
     });
 
-    // [事件] 发送消息
     socket.on('send_message', async (data) => {
-        const { userId, content, type, bossId, tempId } = data; // tempId 是前端乐观更新用的
+        const { userId, content, type, bossId, tempId } = data; 
         try {
-            // 🚨 核心安全检查：发送前先查用户是否存在
             const user = await prisma.user.findUnique({ where: { id: userId } });
-            
-            // 如果用户不存在（被删了），或者被拉黑了
             if (!user || user.isBlocked) {
-                socket.emit('force_disconnect'); // 告诉前端重置
-                socket.disconnect(true); // 物理切断
-                return; // 结束执行
+                socket.emit('force_disconnect'); 
+                socket.disconnect(true); 
+                return;
             }
 
-            // 更新用户信息（如 BossID）
             if (bossId && bossId !== '未知' && user.bossId !== bossId) {
                 await prisma.user.update({ where: { id: userId }, data: { bossId } });
             }
 
             let finalType = type || (content.startsWith('data:image') ? 'image' : 'text');
             
-            // 存入数据库
             const msg = await prisma.message.create({ 
                 data: { userId, content, type: finalType, isFromUser: true, status: 'sent' } 
             });
             
-            // 回传给前端（带 tempId 方便前端确认消息发送成功）
             socket.emit('receive_message', { ...msg, tempId });
-            
-            // 推送给管理员
             io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: user.bossId, isMuted: user.isMuted });
 
-            // 自动回复 (非工作时间)
             if (!isCambodiaWorkingTime() && !socketAutoReplyHistory.has(socket.id)) {
                 const autoReply = await prisma.message.create({ 
                     data: { userId, content: REST_MESSAGE, type: 'text', isFromUser: false, status: 'sent' } 
@@ -483,7 +466,6 @@ io.on('connection', (socket) => {
                 socketAutoReplyHistory.add(socket.id);
             }
 
-            // TG 通知
             if (bot && !user.isMuted) {
                 const conf = await prisma.globalConfig.findUnique({ where: { key: 'notification_switch' } });
                 if (!conf || conf.value === 'on') {
@@ -503,7 +485,6 @@ io.on('connection', (socket) => {
     socket.on('admin_reply', async ({ targetUserId, content, type, tempId }) => {
         try {
             let finalType = type || (content.startsWith('data:image') ? 'image' : 'text');
-            // 管理员回复时，如果用户不存在则自动恢复（SystemRestore）
             const userExists = await prisma.user.findUnique({ where: { id: targetUserId } });
             if (!userExists) await prisma.user.create({ data: { id: targetUserId, bossId: 'SystemRestore' } });
 
@@ -543,16 +524,11 @@ io.on('connection', (socket) => {
         } catch(e) {}
     });
 
-    // 📌 [核心修改] 网页端删除用户，也要暴力断开
     socket.on('admin_clear_user_data', async ({ userId }) => {
         try {
-            // 1. 删除数据库
             await prisma.message.deleteMany({ where: { userId } });
             await prisma.user.delete({ where: { id: userId } });
-            
-            // 2. 暴力断开连接
             await forceDisconnectUser(userId);
-            
             io.emit('admin_user_deleted', userId);
         } catch(e) {}
     });
@@ -565,7 +541,6 @@ io.on('connection', (socket) => {
             
             io.to('admin_room').emit('admin_user_blocked', userId);
             
-            // 暴力断开
             const sockets = await io.in(userId).fetchSockets();
             sockets.forEach(s => {
                 s.emit('force_logout_blocked');
@@ -578,5 +553,4 @@ io.on('connection', (socket) => {
     });
 });
 
-// 启动服务器
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
