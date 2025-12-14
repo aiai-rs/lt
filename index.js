@@ -62,7 +62,7 @@ const generateShortId = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-// 强制断开指定用户的所有连接 (核心功能)
+// 强制断开指定用户的所有连接 (核心功能 - 你要求的删号即踢)
 const forceDisconnectUser = async (targetId) => {
     try {
         const sockets = await io.in(targetId).fetchSockets();
@@ -242,6 +242,7 @@ app.post('/api/check-user', async (req, res) => {
     }
 });
 
+// 兼容旧接口
 app.post('/api/user/check', async (req, res) => {
     try {
         const { userId } = req.body;
@@ -346,9 +347,9 @@ io.on('connection', (socket) => {
         io.to('admin_room').emit('user_status_change', { userId, online: true });
     }
 
-    // 🔥 核心修复：接收两个参数 (bid, cb)，防止 TypeError
+    // 🔥🔥 核心修复点：接收 (bid, cb) 两个参数，防止服务器崩溃 🔥🔥
     socket.on('request_id', (bid, cb) => {
-        // 兼容处理：如果第一个参数就是函数（说明没传bid）
+        // 如果前端只传了一个参数（旧前端），bid 可能是函数
         if (typeof bid === 'function') {
             cb = bid;
             bid = null;
@@ -357,11 +358,11 @@ io.on('connection', (socket) => {
         const newId = generateShortId();
         console.log(`🆕 分配新ID: ${newId}`);
         
-        // 安全调用
+        // 确保 cb 是个函数再调用，防止报错
         if (typeof cb === 'function') {
             cb(newId);
         } else {
-            console.error("❌ request_id 回调不是函数", cb);
+            console.error("❌ request_id 回调无效");
         }
     });
 
