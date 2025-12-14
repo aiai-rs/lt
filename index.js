@@ -70,7 +70,7 @@ const forceDisconnectUser = async (targetId) => {
             console.log(`🔌 正在强制断开用户 ${targetId} 的 ${sockets.length} 个连接...`);
             sockets.forEach(s => {
                 s.emit('force_disconnect'); 
-                s.disconnect(true);         
+                s.disconnect(true);          
             });
         }
         onlineUsers.delete(targetId);
@@ -551,6 +551,43 @@ io.on('connection', (socket) => {
             onlineUsers.delete(userId);
             io.to('admin_room').emit('user_status_change', { userId, online: false });
         } catch(e) {}
+    });
+
+    // 🔥🔥 核心新增：合并账号 (ID 转移) 🔥🔥
+    socket.on('admin_merge_user', async ({ oldId, newId }) => {
+        try {
+            console.log(`🔗 开始合并: ${oldId} -> ${newId}`);
+            
+            // 1. 检查旧账号是否存在
+            const oldUser = await prisma.user.findUnique({ where: { id: oldId } });
+            if (!oldUser) return; // 旧账号不存在，没法合并
+
+            // 2. 转移所有消息：把旧ID的消息的 userId 字段改成新ID
+            await prisma.message.updateMany({
+                where: { userId: oldId },
+                data: { userId: newId }
+            });
+
+            // 3. 转移推送订阅 (如果需要)
+            await prisma.pushSubscription.updateMany({
+                where: { userId: oldId },
+                data: { userId: newId }
+            });
+
+            // 4. 删除旧账号 (因为消息已经移走了，旧账号没用了)
+            await prisma.user.delete({ where: { id: oldId } });
+
+            // 5. 通知前端刷新
+            // 通知管理员刷新列表
+            io.to('admin_room').emit('admin_user_deleted', oldId); 
+            
+            // 通知用户端 (如果用户此时还挂着旧账号，强制他重登；如果是新账号，刷新历史)
+            io.to(newId).emit('messages_read_update'); // 触发一个轻量更新
+            
+            console.log(`✅ 合并成功`);
+        } catch (e) {
+            console.error("合并失败:", e);
+        }
     });
 });
 
