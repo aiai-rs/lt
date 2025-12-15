@@ -7,17 +7,16 @@ const { Telegraf, Markup } = require('telegraf');
 const cors = require('cors');
 const webpush = require('web-push');
 
-// 👇👇👇 截图里漏掉了这部分，一定要补上！👇👇👇
+// 初始化应用
 const app = express();
 const prisma = new PrismaClient();
 
-// 增加 Payload 限制
+// 增加 Payload 限制 (处理图片上传)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors({ origin: "*" })); 
 
 const server = http.createServer(app);
-// 👆👆👆 漏掉的部分结束 👆👆👆
 
 // ==========================================
 // 修改部分：Socket.IO 初始化配置 (针对 iOS 优化)
@@ -28,12 +27,13 @@ const io = new Server(server, {
         methods: ["GET", "POST"]
     },
     maxHttpBufferSize: 1e8, // 100MB 限制
-    // 👇 关键修改：显式支持 polling，配合前端的强制连接策略
+    // 👇 关键修改：显式支持 polling，配合前端的强制连接策略，解决iOS网络切换问题
     transports: ['websocket', 'polling'], 
     // 👇 关键修改：缩短心跳时间，iOS 锁屏后能更快检测到断连并重连
     pingTimeout: 20000,      // 20秒超时
     pingInterval: 10000      // 10秒发一次心跳
 });
+
 // 环境变量配置读取
 const PORT = process.env.PORT || 10000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
