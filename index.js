@@ -74,7 +74,7 @@ const forceDisconnectUser = async (targetId) => {
             console.log(`🔌 正在强制断开用户 ${targetId} 的 ${sockets.length} 个连接...`);
             sockets.forEach(s => {
                 s.emit('force_disconnect'); 
-                s.disconnect(true);          
+                s.disconnect(true);           
             });
         }
         onlineUsers.delete(targetId);
@@ -103,9 +103,11 @@ const WELCOME_MESSAGE = `👋 您好！
 ⏰ 业务员上班时间 (柬埔寨时间):
 下午 13:00 - 晚上 23:00`;
 
-// 休息时间自动回复 (非上班时间发送)
+// 修改：休息时间自动回复 (增加提示安装APP的话术)
 const REST_MESSAGE = `💤 当前是休息时间 (柬埔寨 13:00-23:00 以外)。
-有事请留言，业务员上班后会第一时间回复你！`;
+有事请留言，业务员上班后会第一时间回复你！
+
+⚠️ 为避免收不到回复通知，建议您点击页面下方的“APP”或“开启通知”按钮安装应用。`;
 
 // ==========================================
 // 3. Telegram Bot 完整逻辑 (管理端)
@@ -135,7 +137,7 @@ if (BOT_TOKEN) {
 
     // [指令] /bz - 帮助菜单
     bot.command('bz', (ctx) => {
-        ctx.reply(`🛠️ **管理员指令全集**
+        ctx.reply(`🛠 **管理员指令全集**
 /bz - 显示此帮助
 /ck - 查看用户列表 & 数据统计
 /sjkqk - ⚠️ **暴力清空数据库** (慎用)
@@ -220,7 +222,7 @@ if (BOT_TOKEN) {
                 const boss = u.bossId || '无';
                 text += `🆔 \`${u.id}\` | 👤 ${boss} | 💬 ${u._count.messages}\n`;
                 // 给每个用户加一个删除按钮
-                buttons.push([Markup.button.callback(`🗑️ 删除 ${u.id}`, `del_${u.id}`)]);
+                buttons.push([Markup.button.callback(`🗑 删除 ${u.id}`, `del_${u.id}`)]);
             });
 
             buttons.push([Markup.button.callback('❌ 关闭列表', 'cancel')]);
@@ -247,7 +249,7 @@ if (BOT_TOKEN) {
             io.emit('admin_user_deleted', targetId);
             
             await ctx.answerCbQuery(`用户 ${targetId} 已删除`);
-            await ctx.reply(`🗑️ 用户 \`${targetId}\` 及其所有记录已移除，连接已强制中断。`, { parse_mode: 'Markdown' });
+            await ctx.reply(`🗑 用户 \`${targetId}\` 及其所有记录已移除，连接已强制中断。`, { parse_mode: 'Markdown' });
         } catch (e) {
             await ctx.answerCbQuery("删除失败或用户不存在");
         }
@@ -538,7 +540,7 @@ io.on('connection', (socket) => {
                         const txt = finalType === 'image' ? "📷 [图片]" : content.substring(0, 100);
                         await bot.telegram.sendMessage(ALLOWED_GROUP_ID, `${mention} 🔔 **新消息**\nID: \`${userId}\`\n内容: ${txt}`, { 
                             parse_mode: 'Markdown',
-                            ...Markup.inlineKeyboard([[Markup.button.callback(`🗑️ 删除此人`, `del_${userId}`)]])
+                            ...Markup.inlineKeyboard([[Markup.button.callback(`🗑 删除此人`, `del_${userId}`)]])
                         });
                     } catch(e) { console.error("TG通知失败:", e.message); }
                 }
