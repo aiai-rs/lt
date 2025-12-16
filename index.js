@@ -63,7 +63,7 @@ const forceDisconnectUser = async (targetId) => {
         if (sockets.length > 0) {
             sockets.forEach(s => {
                 s.emit('force_disconnect'); 
-                s.disconnect(true);           
+                s.disconnect(true);            
             });
         }
         onlineUsers.delete(targetId);
@@ -297,6 +297,7 @@ io.on('connection', (socket) => {
         socket.join(userId);
         socket.userId = userId;
         onlineUsers.add(userId);
+        // 修改：确保连接时立即广播在线状态，解决状态不准问题
         io.to('admin_room').emit('user_status_change', { userId, online: true });
     }
 
@@ -335,7 +336,7 @@ io.on('connection', (socket) => {
                 }
                 socket.userId = userId;
                 onlineUsers.add(userId);
-                // 修改：确保用户加入时，管理员端收到状态更新，用于实时刷新列表
+                // 修改：确保用户加入/重连时，管理员端收到准确的在线状态更新
                 io.to('admin_room').emit('user_status_change', { userId, online: true });
             } catch(e) {}
         }
@@ -346,7 +347,7 @@ io.on('connection', (socket) => {
             onlineUsers.delete(socket.userId);
             socketAutoReplyHistory.delete(socket.id);
             try { await prisma.user.update({ where: { id: socket.userId }, data: { updatedAt: new Date() } }); } catch(e) {}
-            // 修改：用户下线时，立即通知管理员，用于实时刷新列表
+            // 修改：确保离线状态实时准确更新
             io.to('admin_room').emit('user_status_change', { userId: socket.userId, online: false });
         }
     });
@@ -385,6 +386,11 @@ io.on('connection', (socket) => {
             if (bossId && bossId !== '未知' && user.bossId !== bossId) {
                 await prisma.user.update({ where: { id: userId }, data: { bossId } });
             }
+
+            // 修改：收到消息时，强制更新用户的 updatedAt 时间
+            // 这保证了后台列表能按最新时间排序，实现“有人发消息就自动刷新”的效果
+            await prisma.user.update({ where: { id: userId }, data: { updatedAt: new Date() } });
+
             let finalType = type || (content.startsWith('data:image') ? 'image' : 'text');
             const msg = await prisma.message.create({ data: { userId, content, type: finalType, isFromUser: true, status: 'sent' } });
             socket.emit('receive_message', { ...msg, tempId });
@@ -428,7 +434,6 @@ io.on('connection', (socket) => {
 
             if (process.env.VAPID_PUBLIC_KEY) {
                 const subs = await prisma.pushSubscription.findMany({ where: { userId: targetUserId } });
-                // 修改：确保 title 正确，并在 body 中提供简略信息，这是安卓PWA通知的关键
                 const payload = JSON.stringify({ 
                     title: '汇盈国际 - 新消息', 
                     body: finalType === 'image' ? '[发来一张图片]' : content, 
@@ -454,7 +459,6 @@ io.on('connection', (socket) => {
     socket.on('admin_delete_message', async ({ messageId, userId }) => {
         try {
             await prisma.message.delete({ where: { id: messageId } });
-            // 修改：在广播删除事件时，带上 userId，方便前端定位刷新
             io.to('admin_room').emit('message_deleted', { messageId, userId });
             io.to(userId).emit('message_deleted', { messageId });
         } catch(e) {}
@@ -469,18 +473,24 @@ io.on('connection', (socket) => {
         } catch(e) {}
     });
 
+    // 修改：彻底重写拉黑逻辑，满足“拉黑即从数据库删除ID和聊天记录”的要求
     socket.on('admin_block_user', async ({ userId }) => {
         try {
-            await prisma.user.update({ where: { id: userId }, data: { isBlocked: true, isMuted: true } });
+            // 1. 先删除关联的所有消息
             await prisma.message.deleteMany({ where: { userId } });
+            // 2. 删除推送订阅
             await prisma.pushSubscription.deleteMany({ where: { userId } });
+            // 3. 彻底删除用户 (不再是 update isBlocked: true)
+            await prisma.user.delete({ where: { id: userId } });
             
+            // 4. 强制断开连接
             const sockets = await io.in(userId).fetchSockets();
             sockets.forEach(s => {
                 s.emit('force_logout_blocked');
                 s.disconnect(true);
             });
             
+            // 5. 通知前端移除用户
             io.emit('admin_user_blocked', userId); 
             onlineUsers.delete(userId);
             io.to('admin_room').emit('user_status_change', { userId, online: false });
