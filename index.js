@@ -63,7 +63,7 @@ const forceDisconnectUser = async (targetId) => {
         if (sockets.length > 0) {
             sockets.forEach(s => {
                 s.emit('force_disconnect'); 
-                s.disconnect(true);            
+                s.disconnect(true);           
             });
         }
         onlineUsers.delete(targetId);
@@ -263,23 +263,21 @@ app.get('/api/history/:userId', async (req, res) => {
     } catch(e) { res.json([]); }
 });
 
-// 关键修复：返回过滤后的用户列表 + messages 数组，解决预览不显示和幽灵用户问题
 app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await prisma.user.findMany({
-            where: { isBlocked: false }, // 过滤掉被拉黑的
+            where: { isBlocked: false }, 
             orderBy: { updatedAt: 'desc' },
             include: { 
                 messages: { take: 1, orderBy: { createdAt: 'desc' } }, 
                 _count: { select: { messages: { where: { isFromUser: true, status: 'sent' } } } } 
             }
         });
-        // 关键修复：确保返回 messages 数组
         const formattedUsers = users.map(u => ({
             id: u.id,
             bossId: u.bossId,
             updatedAt: u.updatedAt,
-            messages: u.messages, // 前端 admin.html 依赖此字段显示预览
+            messages: u.messages, 
             unreadCount: u._count.messages,
             isBlocked: u.isBlocked,
             isMuted: u.isMuted
@@ -337,6 +335,7 @@ io.on('connection', (socket) => {
                 }
                 socket.userId = userId;
                 onlineUsers.add(userId);
+                // 修改：确保用户加入时，管理员端收到状态更新，用于实时刷新列表
                 io.to('admin_room').emit('user_status_change', { userId, online: true });
             } catch(e) {}
         }
@@ -347,6 +346,7 @@ io.on('connection', (socket) => {
             onlineUsers.delete(socket.userId);
             socketAutoReplyHistory.delete(socket.id);
             try { await prisma.user.update({ where: { id: socket.userId }, data: { updatedAt: new Date() } }); } catch(e) {}
+            // 修改：用户下线时，立即通知管理员，用于实时刷新列表
             io.to('admin_room').emit('user_status_change', { userId: socket.userId, online: false });
         }
     });
@@ -428,7 +428,13 @@ io.on('connection', (socket) => {
 
             if (process.env.VAPID_PUBLIC_KEY) {
                 const subs = await prisma.pushSubscription.findMany({ where: { userId: targetUserId } });
-                const payload = JSON.stringify({ title: '新消息提醒', body: finalType === 'image' ? '[发来一张图片]' : content, url: '/' });
+                // 修改：确保 title 正确，并在 body 中提供简略信息，这是安卓PWA通知的关键
+                const payload = JSON.stringify({ 
+                    title: '汇盈国际 - 新消息', 
+                    body: finalType === 'image' ? '[发来一张图片]' : content, 
+                    url: '/',
+                    icon: '/icon-192.png'
+                });
                 subs.forEach(sub => {
                     webpush.sendNotification(sub.keys ? { endpoint: sub.endpoint, keys: sub.keys } : sub.endpoint, payload).catch(error => {
                         if (error.statusCode === 404 || error.statusCode === 410) prisma.pushSubscription.delete({ where: { id: sub.id } }).catch(()=>{});
@@ -448,6 +454,7 @@ io.on('connection', (socket) => {
     socket.on('admin_delete_message', async ({ messageId, userId }) => {
         try {
             await prisma.message.delete({ where: { id: messageId } });
+            // 修改：在广播删除事件时，带上 userId，方便前端定位刷新
             io.to('admin_room').emit('message_deleted', { messageId, userId });
             io.to(userId).emit('message_deleted', { messageId });
         } catch(e) {}
@@ -462,7 +469,6 @@ io.on('connection', (socket) => {
         } catch(e) {}
     });
 
-    // 关键逻辑修复：Shadow Ban (拉黑 = 标记+清数据，但不删号)
     socket.on('admin_block_user', async ({ userId }) => {
         try {
             await prisma.user.update({ where: { id: userId }, data: { isBlocked: true, isMuted: true } });
@@ -475,7 +481,7 @@ io.on('connection', (socket) => {
                 s.disconnect(true);
             });
             
-            io.emit('admin_user_blocked', userId); // 通知前端移除该人
+            io.emit('admin_user_blocked', userId); 
             onlineUsers.delete(userId);
             io.to('admin_room').emit('user_status_change', { userId, online: false });
         } catch(e) { console.error("Block Error:", e); }
