@@ -23,8 +23,9 @@ const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] },
     maxHttpBufferSize: 1e8,
     transports: ['websocket', 'polling'], 
-    pingTimeout: 20000,
-    pingInterval: 10000
+    // --- 修复 1: 调快心跳检测，让“离线”状态更新更及时 (原 20s -> 10s) ---
+    pingTimeout: 10000, 
+    pingInterval: 5000
 });
 
 // 环境变量配置
@@ -83,38 +84,32 @@ const isCambodiaWorkingTime = () => {
 const WELCOME_MESSAGE = `👋 您好！\n这里是汇盈国际业务员。\n\n👨‍💻 业务员正在与您连接...你可以正常发送消息\n我们将教您如何正确使用 Telegram 与老板直接沟通。\n\n⏰ 业务员上班时间 (柬埔寨时间):\n下午 13:00 - 晚上 23:00`;
 const REST_MESSAGE = `💤 当前是休息时间 (柬埔寨 13:00-23:00 以外)。\n有事请留言，业务员上班后会第一时间回复你！\n\n⚠️ 为避免收不到回复通知，建议您点击页面下方的“APP”或“开启通知”按钮安装应用。`;
 
-// === Telegram Bot 完整逻辑 ===
+// === Telegram Bot 完整逻辑 (保持不变) ===
 let bot = null;
 if (BOT_TOKEN) {
     bot = new Telegraf(BOT_TOKEN);
     
     // 1. 机器人访问监控与权限校验
     bot.use(async (ctx, next) => {
-        // [功能] 访问监控通知：只要有人发消息给机器人，立刻通知管理群
         try {
             if (ctx.from && ALLOWED_GROUP_ID) {
                 const currentChatId = String(ctx.chat?.id);
-                // 排除管理群自身消息，防止死循环
                 if (currentChatId !== ALLOWED_GROUP_ID) {
                     const { id, username, first_name } = ctx.from;
                     const text = ctx.message?.text || '[非文本消息]';
                     const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Phnom_Penh' });
-                    
-                    // 发送监控日志到群组
                     await ctx.telegram.sendMessage(ALLOWED_GROUP_ID, `🔔 **检测到机器人访问**\n\n⏰ 时间: ${time}\n👤 姓名: ${first_name}\n📛 用户名: @${username || '无'}\n🆔 ID: \`${id}\`\n💬 内容: ${text}`, { parse_mode: 'Markdown' });
                 }
             }
         } catch(e) {}
 
-        // [权限] 2. 群组 ID 检查
         if (ctx.chat && ctx.chat.type !== 'private' && String(ctx.chat.id) !== ALLOWED_GROUP_ID) {
             try { await ctx.leaveChat(); } catch(e) {}
             return;
         }
 
-        // [权限] 3. 白名单用户校验
         if (ctx.from && ALLOWED_BOT_USERS.length > 0 && !ALLOWED_BOT_USERS.includes(ctx.from.id)) {
-            return; // 非白名单用户不响应指令
+            return; 
         }
 
         return next();
@@ -122,12 +117,10 @@ if (BOT_TOKEN) {
 
     bot.start((ctx) => ctx.reply(`✅ System Online`));
 
-    // [指令] /bz - 帮助菜单
     bot.command('bz', (ctx) => {
         ctx.reply(`🛠 **管理员指令全集**\n/bz - 帮助\n/ck - 统计\n/sjkqk - 清库\n/zc - 改密\n/del ID - 删除`, { parse_mode: 'Markdown' });
     });
 
-    // [指令] /ck - 查看统计
     bot.command('ck', async (ctx) => {
         try {
             const userCount = await prisma.user.count();
@@ -156,7 +149,6 @@ if (BOT_TOKEN) {
         }
     });
 
-    // [指令] /zc - 修改密码
     bot.command('zc', async (ctx) => {
         const password = ctx.message.text.split(/\s+/)[1];
         if(!password) return ctx.reply("❌ 用法: /zc 新密码");
@@ -173,7 +165,6 @@ if (BOT_TOKEN) {
         }
     });
 
-    // [指令] /sjkqk - 核弹清空
     bot.command('sjkqk', (ctx) => {
         ctx.reply('⚠️ **核弹警告：全库清空** ⚠️\n\n将删除：\n1. 所有聊天记录\n2. 所有用户账号\n3. 所有订阅\n\n确定执行？', 
             Markup.inlineKeyboard([
@@ -202,7 +193,6 @@ if (BOT_TOKEN) {
         }
     });
 
-    // 按钮动作：删除用户
     bot.action(/del_(.+)/, async (ctx) => {
         const targetId = ctx.match[1];
         try {
@@ -297,7 +287,6 @@ io.on('connection', (socket) => {
         socket.join(userId);
         socket.userId = userId;
         onlineUsers.add(userId);
-        // 修改：确保连接时立即广播在线状态，解决状态不准问题
         io.to('admin_room').emit('user_status_change', { userId, online: true });
     }
 
@@ -336,7 +325,6 @@ io.on('connection', (socket) => {
                 }
                 socket.userId = userId;
                 onlineUsers.add(userId);
-                // 修改：确保用户加入/重连时，管理员端收到准确的在线状态更新
                 io.to('admin_room').emit('user_status_change', { userId, online: true });
             } catch(e) {}
         }
@@ -347,7 +335,6 @@ io.on('connection', (socket) => {
             onlineUsers.delete(socket.userId);
             socketAutoReplyHistory.delete(socket.id);
             try { await prisma.user.update({ where: { id: socket.userId }, data: { updatedAt: new Date() } }); } catch(e) {}
-            // 修改：确保离线状态实时准确更新
             io.to('admin_room').emit('user_status_change', { userId: socket.userId, online: false });
         }
     });
@@ -377,6 +364,12 @@ io.on('connection', (socket) => {
     socket.on('send_message', async (data) => {
         const { userId, content, type, bossId, tempId } = data; 
         try {
+            // --- 修复 2: 强制状态同步。只要发消息，就是在线。防止服务器重启后状态丢失 ---
+            if (!onlineUsers.has(userId)) {
+                onlineUsers.add(userId);
+                io.to('admin_room').emit('user_status_change', { userId, online: true });
+            }
+
             const user = await prisma.user.findUnique({ where: { id: userId } });
             if (!user || user.isBlocked) { 
                 socket.emit('force_logout_blocked'); 
@@ -387,13 +380,14 @@ io.on('connection', (socket) => {
                 await prisma.user.update({ where: { id: userId }, data: { bossId } });
             }
 
-            // 修改：收到消息时，强制更新用户的 updatedAt 时间
-            // 这保证了后台列表能按最新时间排序，实现“有人发消息就自动刷新”的效果
+            // 更新时间，确保列表排序
             await prisma.user.update({ where: { id: userId }, data: { updatedAt: new Date() } });
 
             let finalType = type || (content.startsWith('data:image') ? 'image' : 'text');
             const msg = await prisma.message.create({ data: { userId, content, type: finalType, isFromUser: true, status: 'sent' } });
+            
             socket.emit('receive_message', { ...msg, tempId });
+            // 广播给管理员
             io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: user.bossId, isMuted: user.isMuted });
 
             if (!isCambodiaWorkingTime()) {
@@ -407,6 +401,7 @@ io.on('connection', (socket) => {
                 }
             }
 
+            // Telegram 通知逻辑 (保持不变)
             if (bot && !user.isMuted && ALLOWED_GROUP_ID) {
                 const conf = await prisma.globalConfig.findUnique({ where: { key: 'notification_switch' } });
                 if (!conf || conf.value === 'on') {
@@ -429,7 +424,9 @@ io.on('connection', (socket) => {
             const userExists = await prisma.user.findUnique({ where: { id: targetUserId } });
             if (!userExists) await prisma.user.create({ data: { id: targetUserId, bossId: 'SystemRestore' } });
             const msg = await prisma.message.create({ data: { userId: targetUserId, content, type: finalType, isFromUser: false, status: 'sent' } });
+            
             io.to(targetUserId).emit('receive_message', msg);
+            // 将 tempId 原样传回给管理员，配合前端修复删除Bug
             io.to('admin_room').emit('admin_receive_message', { ...msg, bossId: 'System', tempId });
 
             if (process.env.VAPID_PUBLIC_KEY) {
@@ -458,10 +455,16 @@ io.on('connection', (socket) => {
 
     socket.on('admin_delete_message', async ({ messageId, userId }) => {
         try {
-            await prisma.message.delete({ where: { id: messageId } });
+            // --- 修复 3: 安全 ID 转换。防止字符串 ID 导致删除失败 ---
+            // 如果你的数据库 ID 是数字，这步非常关键。如果是字符串(uuid)，这步也不会报错。
+            const safeId = !isNaN(Number(messageId)) ? Number(messageId) : messageId;
+            
+            await prisma.message.delete({ where: { id: safeId } });
             io.to('admin_room').emit('message_deleted', { messageId, userId });
             io.to(userId).emit('message_deleted', { messageId });
-        } catch(e) {}
+        } catch(e) {
+            console.error("Delete Msg Error:", e.message);
+        }
     });
 
     socket.on('admin_clear_user_data', async ({ userId }) => {
@@ -473,24 +476,18 @@ io.on('connection', (socket) => {
         } catch(e) {}
     });
 
-    // 修改：彻底重写拉黑逻辑，满足“拉黑即从数据库删除ID和聊天记录”的要求
     socket.on('admin_block_user', async ({ userId }) => {
         try {
-            // 1. 先删除关联的所有消息
             await prisma.message.deleteMany({ where: { userId } });
-            // 2. 删除推送订阅
             await prisma.pushSubscription.deleteMany({ where: { userId } });
-            // 3. 彻底删除用户 (不再是 update isBlocked: true)
             await prisma.user.delete({ where: { id: userId } });
             
-            // 4. 强制断开连接
             const sockets = await io.in(userId).fetchSockets();
             sockets.forEach(s => {
                 s.emit('force_logout_blocked');
                 s.disconnect(true);
             });
             
-            // 5. 通知前端移除用户
             io.emit('admin_user_blocked', userId); 
             onlineUsers.delete(userId);
             io.to('admin_room').emit('user_status_change', { userId, online: false });
