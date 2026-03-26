@@ -29,7 +29,7 @@ const io = new Server(server, {
 });
 
 // 环境变量配置
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 10001;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ALLOWED_GROUP_ID = process.env.ALLOWED_GROUP_ID; 
 const ALLOWED_BOT_USERS = (process.env.ALLOWED_BOT_USERS || '')
